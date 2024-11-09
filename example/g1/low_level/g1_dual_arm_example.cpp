@@ -13,6 +13,9 @@
 #include <unitree/idl/hg/LowCmd_.hpp>
 #include <unitree/idl/hg/LowState_.hpp>
 
+#include <unitree/robot/b2/motion_switcher/motion_switcher_client.hpp>
+using namespace unitree::robot::b2;
+
 static const std::string HG_CMD_TOPIC = "rt/lowcmd";
 static const std::string HG_STATE_TOPIC = "rt/lowstate";
 
@@ -150,6 +153,7 @@ class G1Example {
   double control_dt_;  // [2ms]
   double duration_;    // [3 s]
   PRorAB mode_;
+  uint8_t mode_machine_;
   std::vector<std::vector<double>> frames_data_;
 
   DataBuffer<MotorState> motor_state_buffer_;
@@ -160,10 +164,33 @@ class G1Example {
   ChannelSubscriberPtr<unitree_hg::msg::dds_::LowState_> lowstate_subscriber_;
   ThreadPtr command_writer_ptr_, control_thread_ptr_;
 
+  std::shared_ptr<MotionSwitcherClient> msc;
+
  public:
   G1Example(std::string networkInterface)
-      : time_(0.0), control_dt_(0.002), duration_(3.0), mode_(PR) {
+      : time_(0.0),
+        control_dt_(0.002),
+        duration_(3.0),
+        mode_(PR),
+        mode_machine_(0) {
     ChannelFactory::Instance()->Init(0, networkInterface);
+
+    msc.reset(new MotionSwitcherClient());
+    msc->SetTimeout(5.0F);
+    msc->Init();
+
+    /*Shut down  motion control-related service*/
+    while(queryMotionStatus())
+    {
+        std::cout << "Try to deactivate the motion control-related service." << std::endl;
+        int32_t ret = msc->ReleaseMode(); 
+        if (ret == 0) {
+            std::cout << "ReleaseMode succeeded." << std::endl;
+        } else {
+            std::cout << "ReleaseMode failed. Error code: " << ret << std::endl;
+        }
+        sleep(5);
+    }
 
     loadBehaviorLibrary("motion");
 
@@ -245,17 +272,19 @@ class G1Example {
     imu_tmp.rpy = low_state.imu_state().rpy();
     imu_state_buffer_.SetData(imu_tmp);
 
-    // check mode machine
-    const uint8_t desired_mode_machine = 9;
-    if (low_state.mode_machine() != desired_mode_machine)
-      std::cout << "[ERROR] mode_machine: "
-                << unsigned(low_state.mode_machine()) << "\n";
+    // update mode machine
+    if (mode_machine_ != low_state.mode_machine()) {
+      if (mode_machine_ == 0)
+        std::cout << "G1 type: " << unsigned(low_state.mode_machine())
+                  << std::endl;
+      mode_machine_ = low_state.mode_machine();
+    }
   }
 
   void LowCommandWriter() {
     unitree_hg::msg::dds_::LowCmd_ dds_low_command;
-    dds_low_command.mode_pr() = mode_;   // {0:PR, 1:AB}
-    dds_low_command.mode_machine() = 9;  // {1:23dof, 2:29dof, 3:27dof, 9:14dof}
+    dds_low_command.mode_pr() = mode_;
+    dds_low_command.mode_machine() = mode_machine_;
 
     const std::shared_ptr<const MotorCommand> mc =
         motor_command_buffer_.GetData();
@@ -320,6 +349,46 @@ class G1Example {
 
       motor_command_buffer_.SetData(motor_command_tmp);
     }
+  }
+
+  std::string queryServiceName(std::string form,std::string name)
+  {
+      if(form == "0")
+      {
+          if(name == "normal" ) return "sport_mode"; 
+          if(name == "ai" ) return "ai_sport"; 
+          if(name == "advanced" ) return "advanced_sport"; 
+      }
+      else
+      {
+          if(name == "ai-w" ) return "wheeled_sport(go2W)"; 
+          if(name == "normal-w" ) return "wheeled_sport(b2W)";
+      }
+      return "";
+  }
+
+  int queryMotionStatus()
+  {
+      std::string robotForm,motionName;
+      int motionStatus;
+      int32_t ret = msc->CheckMode(robotForm,motionName);
+      if (ret == 0) {
+          std::cout << "CheckMode succeeded." << std::endl;
+      } else {
+          std::cout << "CheckMode failed. Error code: " << ret << std::endl;
+      }
+      if(motionName.empty())
+      {
+          std::cout << "The motion control-related service is deactivated." << std::endl;
+          motionStatus = 0;
+      }
+      else
+      {
+          std::string serviceName = queryServiceName(robotForm,motionName);
+          std::cout << "Service: "<< serviceName<< " is activate" << std::endl;
+          motionStatus = 1;
+      }
+      return motionStatus;
   }
 };
 
